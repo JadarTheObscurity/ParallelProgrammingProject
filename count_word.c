@@ -6,25 +6,39 @@
 #include<pthread.h>
 #include<sys/time.h>
 
-#define LINE_BUFFER 1048576
+#define LINE_BUFFER 4096
 #define NUM_THREAD 4
 typedef struct _IO_FILE FILE;
 
-KHASH_MAP_INIT_INT(symbol, long long int)
+KHASH_MAP_INIT_STR(symbol, long long int)
 FILE *file;
 
 char* request_buffer(FILE* file, int size);
 void parse_line(char *line, khash_t(symbol) *h) {
     char *c = line;
+    char word[LINE_BUFFER];
+    int word_idx = 0;
     long long int k;
     int ret;
     while(*c != '\0') {
-        k = kh_get(symbol, h, *c);
-        if (k == kh_end(h)) {
-            k = kh_put(symbol, h, *c, &ret);
-            kh_value(h, k) = 0;
+        if (*c == ' ' || *c == '\n') {
+            word[word_idx] = '\0';
+            char *tmp_word;
+            int len = strlen (word) + 1;
+            tmp_word = malloc (len);
+            strncpy (tmp_word, word, len);
+
+            k = kh_get(symbol, h, tmp_word);
+            if (k == kh_end(h)) {
+                k = kh_put(symbol, h, tmp_word, &ret);
+                kh_value(h, k) = 0;
+            }
+            kh_value(h, k) += 1;
+            word_idx = 0;
         }
-        kh_value(h, k) += 1;
+        else {
+            word[word_idx++] = *c;
+        }
         c++;
     }
 }
@@ -55,17 +69,14 @@ char* request_buffer(FILE* file, int size) {
 
 void save_result(char* filename, khash_t(symbol)* h) {
     FILE *fptr;
-
-    // Open a file in writing mode
     fptr = fopen(filename, "w");
-    // Write some text to the file
+
     for (int k = kh_begin(h); k != kh_end(h); ++k) {
         if (kh_exist(h, k)) {
-            fprintf(fptr, "%c: %lld\n", kh_key(h, k), kh_value(h, k));
+            fprintf(fptr, "%s: %lld\n", kh_key(h, k), kh_value(h, k));
         }
     }
     fclose(fptr);
-
 }
 
 struct timeval start, end;
@@ -98,7 +109,6 @@ int main(int argc, char **argv) {
     printf("Single thread elapsed time: %.6f sec\n", elapsed_time);
     save_result("__output_sequential.txt", h_seq);
 
-
     // Multiple Thread
     gettimeofday(&start, NULL);
     file = fopen(argv[1], "r");
@@ -123,7 +133,7 @@ int main(int argc, char **argv) {
         khash_t(symbol) *hi = h_pool[i];
         for (int ki = kh_begin(hi); ki != kh_end(hi); ++ki) {
             if (kh_exist(hi, ki)) {
-                char c = kh_key(hi, ki);
+                const char *c = kh_key(hi, ki);
                 // insert into h
                 k = kh_get(symbol, h_pll, c);
                 if (k == kh_end(h_pll)) {
@@ -138,5 +148,7 @@ int main(int argc, char **argv) {
     elapsed_time = end.tv_sec - start.tv_sec + 0.000001 * (end.tv_usec - start.tv_usec);
     printf("%6d thread elapsed time: %.6f sec\n", NUM_THREAD, elapsed_time);
     save_result("__output_parallel.txt", h_pll);
+    kh_destroy(symbol, h_seq);
+    for(int i = 0; i < NUM_THREAD; ++i) kh_destroy(symbol, h_pool[i]);
     return 0;
 }
