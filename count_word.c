@@ -6,7 +6,7 @@
 #include<pthread.h>
 #include<sys/time.h>
 
-#define LINE_BUFFER 4096
+#define LINE_BUFFER 1048576
 #define NUM_THREAD 4
 typedef struct _IO_FILE FILE;
 
@@ -80,6 +80,7 @@ void save_result(char* filename, khash_t(symbol)* h) {
 }
 
 struct timeval start, end;
+double elapsed_time;
 int main(int argc, char **argv) {
     pthread_mutex_init(&file_lock, NULL);
 
@@ -105,9 +106,10 @@ int main(int argc, char **argv) {
         parse_line(buf, h_seq);
     }
     gettimeofday(&end, NULL);
-    double elapsed_time = end.tv_sec - start.tv_sec + 0.000001 * (end.tv_usec - start.tv_usec);
+    elapsed_time = end.tv_sec - start.tv_sec + 0.000001 * (end.tv_usec - start.tv_usec);
     printf("Single thread elapsed time: %.6f sec\n", elapsed_time);
     save_result("__output_sequential.txt", h_seq);
+    kh_destroy(symbol, h_seq);
 
     // Multiple Thread
     gettimeofday(&start, NULL);
@@ -125,6 +127,11 @@ int main(int argc, char **argv) {
     }
     pthread_mutex_destroy(&file_lock);
     
+    struct timeval thread_finish;
+    gettimeofday(&thread_finish, NULL);
+    elapsed_time = thread_finish.tv_sec - start.tv_sec + 0.000001 * (thread_finish.tv_usec - start.tv_usec);
+    printf("%6d thread finsih parse: %.6f sec\n", NUM_THREAD, elapsed_time);
+
     // Merge the results to h_pool[0]
     khash_t(symbol) *h_pll = h_pool[0];
     long long int  k;
@@ -148,7 +155,6 @@ int main(int argc, char **argv) {
     elapsed_time = end.tv_sec - start.tv_sec + 0.000001 * (end.tv_usec - start.tv_usec);
     printf("%6d thread elapsed time: %.6f sec\n", NUM_THREAD, elapsed_time);
     save_result("__output_parallel.txt", h_pll);
-    kh_destroy(symbol, h_seq);
     for(int i = 0; i < NUM_THREAD; ++i) kh_destroy(symbol, h_pool[i]);
     return 0;
 }
