@@ -1,5 +1,5 @@
 CC=gcc
-CFLAGS=-I. -pthread -O3
+CFLAGS=-I. -pthread -O3 -ggdb3
 
 all: count_char count_word	
 
