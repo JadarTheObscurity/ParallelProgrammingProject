@@ -31,7 +31,7 @@ void sequential(FILE *file, hashtable *h);
 void parallel(FILE *file, hashtable *h);
 
 FILE *file;
-pthread_mutex_t file_lock, hash_table_lock;
+pthread_mutex_t file_lock;
 hashtable *h_pll;
 struct timeval start, end;
 double elapsed_time;
@@ -44,7 +44,6 @@ int main(int argc, char **argv) {
     }
     fclose(file);
     pthread_mutex_init(&file_lock, NULL);
-    pthread_mutex_init(&hash_table_lock, NULL);
     // /*
     printf(" === Single Thread === \n");
     gettimeofday(&start, NULL);
@@ -72,7 +71,6 @@ int main(int argc, char **argv) {
     fclose(file);
 
     pthread_mutex_destroy(&file_lock);
-    pthread_mutex_destroy(&hash_table_lock);
     kh_destroy(symbol, h_pll);
     // for(int i = 0; i < NUM_THREAD; ++i) kh_destroy(symbol, h_pool[i]);
     return 0;
@@ -88,17 +86,13 @@ void parse_line(char *line, hashtable *h) {
             word[word_idx] = '\0';
             char *tmp_word;
             int len = strlen (word) + 1;
-            // tmp_word = malloc (len);
-            // strncpy (tmp_word, word, len);
             tmp_word = strdup(word);
-            // pthread_mutex_lock(&hash_table_lock);
             k = kh_get(symbol, h, tmp_word);
             if (k == kh_end(h)) {
                 k = kh_put(symbol, h, tmp_word, &ret);
                 kh_value(h, k) = 0;
             }
             kh_value(h, k) += 1;
-            // pthread_mutex_unlock(&hash_table_lock);
             word_idx = 0;
         }
         else {
