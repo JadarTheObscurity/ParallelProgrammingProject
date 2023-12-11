@@ -5,9 +5,12 @@
 #include<unistd.h>
 #include<pthread.h>
 #include<sys/time.h>
+#include<time.h>
 #include<string.h>
+#include <semaphore.h>
 
-#define LINE_BUFFER 1048576
+#define LINE_BUFFER 4096
+#define KEY_BUFFER 1048576
 #define NUM_THREAD 4
 KHASH_MAP_INIT_STR(symbol, long long int)
 
@@ -33,8 +36,15 @@ void parallel(FILE *file, hashtable *h);
 FILE *file;
 pthread_mutex_t file_lock;
 hashtable *h_pll;
-struct timeval start, end;
+struct timespec start, end;
 double elapsed_time;
+
+int parse_finish = 0;
+// For buffer
+char *key_buffer[KEY_BUFFER];
+int key_buffer_put_idx = 0, key_buffer_get_idx = 0;
+sem_t sem_put, sem_get;
+pthread_mutex_t key_buffer_lock;
 
 int main(int argc, char **argv) {
     // Read the file
@@ -44,7 +54,7 @@ int main(int argc, char **argv) {
     }
     fclose(file);
     pthread_mutex_init(&file_lock, NULL);
-    // /*
+    /*
     printf(" === Single Thread === \n");
     gettimeofday(&start, NULL);
     file = fopen(argv[1], "r");
@@ -56,25 +66,27 @@ int main(int argc, char **argv) {
     fclose(file);
     save_result("__output_sequential.txt", h_seq);
     kh_destroy(symbol, h_seq);
-    // */
+    */
 
     printf(" === Multiple Thread === \n");
-    gettimeofday(&start, NULL);
+    // gettimeofday(&start, NULL);
+    clock_gettime(CLOCK_THREAD_CPUTIME_ID, &start);
     file = fopen(argv[1], "r");
     // Initialize hash table
     h_pll = kh_init(symbol);
     parallel(file, h_pll);
-    gettimeofday(&end, NULL);
-    elapsed_time = end.tv_sec - start.tv_sec + 0.000001 * (end.tv_usec - start.tv_usec);
+    // gettimeofday(&end, NULL);
+    clock_gettime(CLOCK_THREAD_CPUTIME_ID, &end);
+    elapsed_time = end.tv_sec - start.tv_sec + 0.000000001 * (end.tv_nsec - start.tv_nsec);
     printf("%6d thread elapsed time: %.6f sec\n", NUM_THREAD, elapsed_time);
     save_result("__output_parallel.txt", h_pll);
     fclose(file);
 
     pthread_mutex_destroy(&file_lock);
     kh_destroy(symbol, h_pll);
-    // for(int i = 0; i < NUM_THREAD; ++i) kh_destroy(symbol, h_pool[i]);
     return 0;
 }
+
 void parse_line(char *line, hashtable *h) {
     char *c = line;
     char word[LINE_BUFFER];
@@ -87,12 +99,14 @@ void parse_line(char *line, hashtable *h) {
             char *tmp_word;
             int len = strlen (word) + 1;
             tmp_word = strdup(word);
-            k = kh_get(symbol, h, tmp_word);
-            if (k == kh_end(h)) {
-                k = kh_put(symbol, h, tmp_word, &ret);
-                kh_value(h, k) = 0;
-            }
-            kh_value(h, k) += 1;
+            // send tmp_word to buffer
+            sem_wait(&sem_put);
+            pthread_mutex_lock(&key_buffer_lock);
+            key_buffer[key_buffer_put_idx] = tmp_word;
+            key_buffer_put_idx = (key_buffer_put_idx + 1) % KEY_BUFFER;
+            pthread_mutex_unlock(&key_buffer_lock);
+            sem_post(&sem_get);
+
             word_idx = 0;
         }
         else {
@@ -117,25 +131,30 @@ void *pthread_parse_file(void* argv) {
         free(buf);
     }
 }
-void *pthread_merge_hashtable(void* args) {
-    merge_hashtable_args *h_args = (merge_hashtable_args*) args;
-    hashtable *h1 = h_args->h1;
-    hashtable *h2 = h_args->h2;
-    int k1, k2; // key for h1
-    int ret;
-    // Loop through all keys in h2
-    for (k2 = kh_begin(h2); k2 != kh_end(h2); ++k2) {
-        if (!kh_exist(h2, k2)) continue;
-        const char *c = kh_key(h2, k2);
-        k1 = kh_get(symbol, h1, c);
-        // If k2 not in h1, add it
-        if (k1 == kh_end(h1)) {
-            k1 = kh_put(symbol, h1, c, &ret);
-            kh_value(h1, k1) = 0;
+
+void *pthraed_buf_to_hashtable(void* argv) {
+    hashtable *h = (hashtable*)argv;
+    int k, ret;
+    while(1) {
+        sem_wait(&sem_get);
+        // TODO: find a better way to deal with finish problem
+        if (parse_finish) {
+            // printf("put idx %d get idx %d, sem_put %d\n", key_buffer_put_idx, key_buffer_get_idx, sem_get_val);
+            break;
         }
-        kh_value(h1, k1) += kh_value(h2, k2);
+        pthread_mutex_lock(&key_buffer_lock);
+        const char* word = key_buffer[key_buffer_get_idx];
+        pthread_mutex_unlock(&key_buffer_lock);
+        sem_post(&sem_put);
+        key_buffer_get_idx = (key_buffer_get_idx + 1) % KEY_BUFFER;
+        k = kh_get(symbol, h, word);
+        if (k == kh_end(h)) {
+            k = kh_put(symbol, h, word, &ret);
+            kh_value(h, k) = 0;
+        }
+        kh_value(h, k) += 1;
+        // printf("Get %s with put idx %d get idx %d, sem_put %d\n", word, key_buffer_put_idx, key_buffer_get_idx, sem_get_val);
     }
-    free(args);
 }
 
 char* request_buffer(FILE* file, int size) {
@@ -176,46 +195,39 @@ void sequential(FILE *file, hashtable *h) {
 }
 
 void parallel(FILE *file, hashtable *h) {
+    
+    sem_init(&sem_put, 0, KEY_BUFFER);
+    sem_init(&sem_get, 0, 0);
+    pthread_mutex_init(&key_buffer_lock, NULL);
+    parse_finish = 0;
+
     pthread_t *thread_pool = (pthread_t*)malloc(sizeof(pthread_t) * NUM_THREAD);
+    pthread_t buf_to_hashtable_thread;
     hashtable *h_pool[NUM_THREAD];
     h_pool[0] = h;
     for (int i = 1; i < NUM_THREAD; ++i) h_pool[i] = kh_init(symbol);
 
+    // Create thread 
     for (int i = 0; i < NUM_THREAD; ++i) {
         pthread_create(&thread_pool[i], NULL, pthread_parse_file, (void *)h_pool[i]);
     }
+
+    // Wait for thread complete
     for (int i = 0; i < NUM_THREAD; ++i) {
         pthread_join(thread_pool[i], NULL);
     }
-    struct timeval thread_finish;
-    gettimeofday(&thread_finish, NULL);
-    elapsed_time = thread_finish.tv_sec - start.tv_sec + 0.000001 * (thread_finish.tv_usec - start.tv_usec);
-    printf("%6d thread finish parse: %.6f sec\n", NUM_THREAD, elapsed_time);
-    int num_hash_table = NUM_THREAD;
-    // Merge hash tables
-    // TODO: Deal with num_hash_table not a power of 2
-    while(num_hash_table > 1) {
-        num_hash_table >>= 1;
-        for (int i = 0; i < num_hash_table; ++i) {
-            merge_hashtable_args *args = (merge_hashtable_args*)malloc(sizeof(merge_hashtable_args));
-            args->h1_index = i;
-            args->h2_index = i + num_hash_table;
-            args->h1 = h_pool[args->h1_index];
-            args->h2 = h_pool[args->h2_index];
-            pthread_create(&thread_pool[i], NULL, pthread_merge_hashtable, (void *)args);
-            printf("Merge %d %d\n", i, i + num_hash_table);
-        }
-        for (int i = 0; i < num_hash_table; ++i) {
-            pthread_join(thread_pool[i], NULL);
-        }
-        struct timeval merge_finish;
-        gettimeofday(&merge_finish, NULL);
-        elapsed_time = merge_finish.tv_sec - start.tv_sec + 0.000001 * (merge_finish.tv_usec - start.tv_usec);
-        printf("%6d thread finish merge with %d of hash table remains: %.6f sec\n", NUM_THREAD, num_hash_table, elapsed_time);
 
-    }
+    // struct timeval thread_finish;
+    // gettimeofday(&thread_finish, NULL);
+    // elapsed_time = thread_finish.tv_sec - start.tv_sec + 0.000001 * (thread_finish.tv_usec - start.tv_usec);
+    // printf("%6d thread finish parse: %.6f sec\n", NUM_THREAD, elapsed_time);
+
+    // Clean up
     for(int i = 1; i < NUM_THREAD; ++i) {
         kh_destroy(symbol, h_pool[i]);
     }
     free(thread_pool);
+    sem_destroy(&sem_put);
+    sem_destroy(&sem_put);
+    pthread_mutex_destroy(&key_buffer_lock);
 } 
